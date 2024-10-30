@@ -12,27 +12,19 @@
 #include <iomanip>
 #include <string>
 
-using HWIDError = std::string;
+struct HwidError {
+    std::string message;
+};
 
-class HWID {
+class HwidBase {
+public:
+    virtual ~HwidBase() = default;
+    virtual std::expected<std::string, HwidError> generate() = 0;
+
 protected:
-    HWID() = default;
-    virtual ~HWID() = default;
+    HwidBase() = default;
 
-    void set_username(const std::string &username) {
-        m_username = username;
-    }
-    void set_os(const std::string &os) {
-        m_os = os;
-    }
-    void set_architecture(const std::string &architecture) {
-        m_architecture = architecture;
-    }
-    void set_motherboard_serial(const std::string &motherboard_serial) {
-        m_motherboard_serial = motherboard_serial;
-    }
-
-    std::string to_string() const {
+    std::string format() const {
         return std::format("{},{},{}-{}", m_username, m_motherboard_serial, m_os, m_architecture);
     }
 
@@ -41,79 +33,74 @@ protected:
     std::string m_os;
     std::string m_architecture;
     std::string m_motherboard_serial;
-
-    friend struct std::hash<HWID>;
 };
-
-namespace std {
-template <>
-struct hash<HWID> {
-    std::size_t operator()(const HWID &hwid) const {
-        return std::hash<std::string>()(hwid.to_string());
-    }
-};
-}  // namespace std
 
 // Platform-specific implementations
 
-class LinuxHWID : public HWID {
+#ifdef __linux__
+class LinuxHwid : public HwidBase {
 public:
-    static std::expected<std::string, HWIDError> generate() {
-        LinuxHWID hwid;
+    std::expected<std::string, HwidError> generate() {
+        set_system_info().or_else([](const HwidError &error) { return std::unexpected(error); });
 
-        if (const auto result = hwid.get_system_info(); !result) {
-            return std::unexpected(result.error());
-        }
+        set_motherboard_serial().or_else(
+            [](const HwidError &error) { return std::unexpected(error); });
 
-        if (const auto result = hwid.get_motherboard_serial(); !result) {
-            return std::unexpected(result.error());
-        }
-
-        std::hash<HWID> hasher;
-        return std::to_string(hasher(hwid));
+        size_t hash = std::hash<std::string>()(format());
+        return std::to_string(hash);
     }
 
 private:
-    LinuxHWID() : HWID() {}
-
-    std::expected<void, HWIDError> get_system_info() {
+    std::expected<void, HwidError> set_system_info() {
         struct utsname utsame;
         if (-1 == uname(&utsame)) {
-            return std::unexpected("Unable to access system architecture details.");
+            return std::unexpected("Failed to retrieve system information.");
         }
 
-        set_username(utsame.nodename);
-        set_os(utsame.sysname);
-        set_architecture(utsame.machine);
-
+        m_username = utsame.nodename;
+        m_os = utsame.sysname;
+        m_architecture = utsame.machine;
         return {};
     }
-
-    std::expected<void, HWIDError> get_motherboard_serial() {
+    std::expected<void, HwidError> set_motherboard_serial() {
         std::ifstream file("/sys/devices/virtual/dmi/id/board_serial");
-        if (!file.is_open()) {
+        if (!file) {
             return std::unexpected(
                 std::format("Failed to open the motherboard serial file ({}).", strerror(errno)));
         }
 
-        std::string motherboard_serial;
         std::getline(file, motherboard_serial);
-        set_motherboard_serial(motherboard_serial);
-
         return {};
     }
 };
+#elif _WIN32
+class WindowsHwid : public HwidBase {
+public:
+    std::expected<std::string, HwidError> generate() {
+        m_username = "hawkew";
+        m_os = "Windows";
+        m_architecture = "x64";
+        m_motherboard_serial = "1234567890";
+
+        size_t hash = std::hash<std::string>()(format());
+        return std::to_string(hash);
+    }
+};
+#endif
 
 // Public interface
 
 namespace hwid {
 
-std::expected<std::string, HWIDError> generate() {
+std::expected<std::string, HwidError> generate() {
 #ifdef __linux__
-    return LinuxHWID::generate();
+    LinuxHwid hwid;
+#elif _WIN32
+    WindowsHwid hwid;
 #else
     return std::unexpected("The current platform is unsupported, only Linux is supported for now.");
 #endif
+    return hwid.generate();
 }
 
 }  // namespace hwid
